@@ -54,7 +54,7 @@ The script will automatically create a tab named `contacts` with the required co
 
 1. Go to [script.google.com](https://script.google.com) while signed into the account
 2. Create a new project
-3. Paste the contents of `sync_contacts.gs` into the editor
+3. Paste the contents of `contacts-share.gs` into the editor
 4. Fill in the config at the top:
    ```javascript
    var SHEET_ID = 'YOUR_SHEET_ID_HERE';
@@ -92,5 +92,5 @@ That's it. No need to run any functions manually.
 
 ## Files
 
-- `sync_contacts.gs` — the Apps Script (deploy identically to both accounts)
+- `contacts.gs` — the Apps Script (deploy identically to both accounts)
 - `README.md` — this file
