@@ -1,4 +1,4 @@
-# Google Contacts Sync
+# Google Contacts Share
 
 Bidirectional sync of contacts labelled **"share"** between two Google accounts, using Google Apps Script and a Google Sheet as a sync buffer.
 
@@ -13,9 +13,11 @@ Any contact tagged with the "share" label in either Google account is automatica
 ## How It Works
 
 1. Each account runs the same script on a 15-minute trigger
-2. On each run, the script reads all contacts labelled "share" and writes them to a shared Google Sheet (push)
-3. It then reads any rows in the Sheet written by the *other* account that haven't been imported yet, creates them as new contacts, and tags them "share" (pull)
-4. Imported rows are marked so they're never processed again
+2. On each run, the script acquires a lock to prevent both accounts writing to the Sheet simultaneously
+3. The script reads all contacts labelled "share" and writes them to the shared Sheet (push)
+4. It then reads any rows written by the *other* account that haven't been imported yet, and creates or merges them into this account (pull)
+5. Processed rows are marked so they are never processed again
+6. If logging is enabled, a summary of each sync run is written to a log tab in the same Sheet
 
 ---
 
@@ -48,7 +50,7 @@ In Account 1, create a new Google Sheet (name it anything, e.g. "Contact Sync").
 https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit
 ```
 
-The script will automatically create a tab named `contacts` with the required columns on first run. Do not create columns manually.
+The script will automatically create the required tabs (`contacts` and `log`) on first run. Do not create columns manually.
 
 ### 2. Set up Apps Script — repeat for both accounts
 
@@ -67,15 +69,61 @@ That's it. No need to run any functions manually.
 
 ---
 
+## Configuration Options
+
+All options are set at the top of the script.
+
+| Option | Default | Description |
+|---|---|---|
+| `SHEET_ID` | *(required)* | ID of the shared Google Sheet |
+| `ACCOUNT_EMAILS` | *(required)* | Array of both account email addresses |
+| `LABEL_NAME` | `share` | The Google Contacts label to sync |
+| `LOGGING_ENABLED` | `true` | Whether to write sync summaries to the log tab |
+| `LOG_MAX_ROWS` | `100` | Maximum number of log rows to retain before trimming |
+| `LOCK_TIMEOUT_MS` | `30000` | Milliseconds to wait for a write lock before aborting (default 30 seconds) |
+
+---
+
+## Logging
+
+When `LOGGING_ENABLED` is `true`, each sync run appends a row to the `log` tab in the shared Sheet. Because both accounts write to the same Sheet, all activity from both accounts appears in a single combined log in chronological order.
+
+| Column | Description |
+|---|---|
+| timestamp | ISO 8601 date and time of the sync run |
+| account | Email address of the account that ran the sync |
+| direction | `push` (this account → Sheet), `pull` (Sheet → this account), or `sync` (lock failure) |
+| pushed | Number of contacts written to the Sheet |
+| new | Number of new contacts created in this account |
+| merged | Number of existing contacts merged with incoming data |
+| failed | Number of operations that failed |
+| errors | Error details, if any |
+
+The log is automatically trimmed to `LOG_MAX_ROWS` so it doesn't grow indefinitely. Set `LOGGING_ENABLED = false` in the config to disable logging entirely.
+
+---
+
+## Privacy
+
+This script processes personal contact data including names, email addresses, and phone numbers. The following applies to how that data is handled:
+
+- **Data stays within your Google ecosystem** — contact data is only ever written to the shared Google Sheet and to your Google Contacts. Nothing is sent to any external server or third party.
+- **The Sheet is private to both accounts** — only the two accounts explicitly shared on the Sheet can access it. No one else can read or write the contact data stored there.
+- **The script runs on Google's infrastructure** — all execution happens within Google Apps Script. No external compute or storage is involved.
+- **You are in control** — you can revoke access, delete the Sheet, or stop the script at any time. Revoking script permissions is done via [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+---
+
 ## Limits
 
 | Limit | Detail |
 |---|---|
 | Apps Script daily execution time | 6 min/run, 90 min/day (free) — far more than needed for typical contact lists |
-| People API batch size | 200 contacts per request — handled automatically |
-| People API write quota | ~90 writes/minute — relevant only if syncing hundreds of contacts at once |
+| People API batch size | 200 contacts per read request — handled automatically |
+| People API write operations | Individual write calls are used per contact. For very large contact lists (500+) this may approach API rate limits (~90 writes/minute). Batch write methods exist in the API but are not currently exposed in the Apps Script People API service |
 | Contacts per "share" group | 1,000 (hardcoded in `maxMembers`) — increase if needed |
 | Sync frequency | Every 15 minutes — adjustable in `createTrigger()` |
+| Concurrent writes | Prevented by LockService — if a lock cannot be acquired within `LOCK_TIMEOUT_MS` the sync is skipped and logged |
 | Photo sync | Not supported |
 | Contacts with no name and no email | Cannot be reliably fingerprinted; may be re-pushed to the Sheet on each sync |
 | Contacts with no email address | Cannot be matched for merging; will always be created as a new record |
@@ -87,6 +135,14 @@ That's it. No need to run any functions manually.
 - **"Running as X which is not in ACCOUNT_EMAILS"** — the email in the script config doesn't match the account running the script. Check `ACCOUNT_EMAILS`.
 - **Contacts not appearing** — confirm the "share" label exists and has contacts in Google Contacts, and that the People API is enabled in the Apps Script project.
 - **Duplicate contacts building up** — expected behaviour for contacts that exist in both accounts before first sync. Use Google Contacts → **Merge & fix** to consolidate.
+- **"Could not acquire lock"** in the log — both accounts attempted to sync at exactly the same time. The second one backed off and will retry on the next trigger cycle (within 15 minutes). No action needed.
+- **Upgrading from a previous version** — rows written by older versions of the script have no status value in column 4 and will be reprocessed on first run. To prevent this, open the `contacts` tab in the Sheet, select all data rows (not the header), and set column D to `imported` before running the updated script.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome.
 
 ---
 
