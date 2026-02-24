@@ -1,3 +1,18 @@
+/**
+ * Google Contacts Share
+ * Bidirectionally syncs contacts labelled "share" between two Gmail accounts.
+ * https://github.com/sjc200/google-contacts-share
+ *
+ * A single script is deployed identically to both accounts. It detects which
+ * account it is running in at runtime and behaves accordingly, using a shared
+ * Google Sheet as a sync buffer.
+ *
+ * Setup: see README.md
+ *
+ * @author sjc200
+ * @licence MIT
+ */
+
 // ============================================================
 // CONFIGURATION — same in both accounts, no changes needed
 // except SHEET_ID and ACCOUNT_EMAILS
