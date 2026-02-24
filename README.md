@@ -80,6 +80,7 @@ All options are set at the top of the script.
 | `LABEL_NAME` | `share` | The Google Contacts label to sync |
 | `LOGGING_ENABLED` | `true` | Whether to write sync summaries to the log tab |
 | `LOG_MAX_ROWS` | `100` | Maximum number of log rows to retain before trimming |
+| `LOG_MAX_ERROR_LENGTH` | `1000` | Maximum characters written to the errors column in the log |
 | `LOCK_TIMEOUT_MS` | `30000` | Milliseconds to wait for a write lock before aborting (default 30 seconds) |
 
 ---
@@ -136,7 +137,7 @@ This script processes personal contact data including names, email addresses, an
 - **Contacts not appearing** — confirm the "share" label exists and has contacts in Google Contacts, and that the People API is enabled in the Apps Script project.
 - **Duplicate contacts building up** — expected behaviour for contacts that exist in both accounts before first sync. Use Google Contacts → **Merge & fix** to consolidate.
 - **"Could not acquire lock"** in the log — both accounts attempted to sync at exactly the same time. The second one backed off and will retry on the next trigger cycle (within 15 minutes). No action needed.
-- **Upgrading from a previous version** — rows written by older versions of the script have no status value in column 4 and will be reprocessed on first run. To prevent this, open the `contacts` tab in the Sheet, select all data rows (not the header), and set column D to `imported` before running the updated script.
+- **Upgrading from v1.0.0** — existing Sheet rows have no status value in column D and will be reprocessed on first run. To prevent this, open the `contacts` tab in the Sheet, select all data rows (not the header), and set column D to `imported` before running the updated script.
 
 ---
 
