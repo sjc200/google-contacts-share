@@ -92,5 +92,5 @@ That's it. No need to run any functions manually.
 
 ## Files
 
-- `contacts.gs` — the Apps Script (deploy identically to both accounts)
+- `contacts-share.gs` — the Apps Script (deploy identically to both accounts)
 - `README.md` — this file
