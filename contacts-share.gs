@@ -8,10 +8,11 @@
  * Google Sheet as a sync buffer.
  *
  * Setup: see README.md
+ * Development history and architecture decisions: see DEVELOPMENT.md
  *
- * @version 1.1.0
+ * @version 1.4.0
  * @author sjc200
- * @licence MIT
+ * @licence GNU GPL v3
  */
 
 // ============================================================
@@ -55,8 +56,8 @@ var UPDATE_FIELDS = PERSON_FIELDS;
 // AUTO SETUP — fires when script is opened
 // Checks whether a time-based trigger already exists for
 // syncContacts, installs one if not, then runs an initial sync.
-// This means the user only needs to open the script once —
-// no manual function calls required.
+// The user only needs to open the script once — no manual
+// function calls required.
 // ============================================================
 function onOpen() {
   var triggers = ScriptApp.getProjectTriggers();
@@ -84,13 +85,12 @@ function createTrigger() {
 // IDENTITY
 // Detects which Google account the script is running in by
 // reading the active user's email. Throws a clear error if
-// the account isn't in ACCOUNT_EMAILS, so misconfigurations
+// the account is not in ACCOUNT_EMAILS so misconfigurations
 // are caught immediately rather than silently misbehaving.
 // ============================================================
 
 /**
- * Returns the email address of the currently active account,
- * normalised to lowercase.
+ * Returns the active account's email address, normalised to lowercase.
  * @return {string}
  */
 function getMyEmail() {
@@ -98,7 +98,7 @@ function getMyEmail() {
 }
 
 /**
- * Validates that the current account is one of the two configured
+ * Validates that the active account is one of the two configured
  * accounts. Throws an error if not.
  * @return {string} The current account's email address.
  */
@@ -112,22 +112,18 @@ function validateAccount() {
 
 // ============================================================
 // MAIN ENTRY POINT
-// Validates the account, then runs push followed by pull.
-// Push writes this account's "share" contacts to the Sheet.
-// Pull reads the other account's contacts from the Sheet and
-// creates or merges them into this account.
-// A script lock is acquired before any Sheet writes to prevent
-// concurrent writes from both accounts corrupting data. If the
-// lock cannot be acquired within LOCK_TIMEOUT_MS, the sync is
-// aborted and an error is logged.
+// Acquires a script-wide lock (shared across both account
+// instances) to prevent concurrent Sheet writes, then runs
+// pull followed by push. Pull runs first so that by the time
+// push builds its receivedHashSet, any newly received rows
+// are already marked "imported" and their hashes are correctly
+// included — preventing contacts from being unnecessarily
+// pushed back to the account they originated from.
+// The lock is always released in a finally block.
 // ============================================================
 function syncContacts() {
   var me = validateAccount();
 
-  // Acquire a script-wide lock before touching the Sheet.
-  // LockService.getScriptLock() is shared across all instances
-  // of this script — i.e. both accounts — so only one can write
-  // to the Sheet at a time.
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(LOCK_TIMEOUT_MS);
@@ -139,30 +135,45 @@ function syncContacts() {
   }
 
   try {
+    pullFromSheet(me); // pull first — see section comment above
     pushToSheet(me);
-    pullFromSheet(me);
   } finally {
-    // Always release the lock, even if an error occurs
     lock.releaseLock();
   }
 }
 
 // ============================================================
 // PUSH
-// Reads all contacts in this account labelled "share" and
-// writes them to the shared Sheet. Each contact is stored as
-// a JSON blob in a single cell, with a fingerprint used to
-// identify the row on subsequent runs (to update rather than
-// append a duplicate row).
-// When updating an existing row, the status column is preserved
-// so that a row marked "imported" by the other account is not
-// reset to blank, which would cause it to be reprocessed.
+// Reads all contacts labelled "share" in this account and
+// upserts them into the shared Sheet as JSON blobs. Each row
+// is identified by a fingerprint so existing rows are updated
+// in place rather than duplicated.
+//
+// Each row stores a normalised hash of the contact data in
+// column 5. "Normalised" means API-derived fields are stripped
+// before hashing so the hash reflects only user-set data and
+// is stable across API round-trips and across accounts.
+//
+// On each push:
+//   - A set of normalised hashes is built from all rows in the
+//     Sheet that were received from the other account (source
+//     = other account, status = imported). If the current
+//     contact's hash appears in this set, it originated from
+//     the other account and has not been locally changed —
+//     skip it entirely. This works for all contacts regardless
+//     of whether they have an email address.
+//   - If the contact's hash matches its own stored hash in the
+//     Sheet, the data is unchanged — skip writing entirely.
+//   - If the hash differs, the contact has changed locally —
+//     write the row with blank status so the other account
+//     re-pulls the update.
+//
+// Because pull runs before push in syncContacts, newly received
+// rows are already marked "imported" by the time the hash set
+// is built, so their hashes are correctly included.
 // ============================================================
 
 /**
- * Reads "share"-labelled contacts from this account and upserts
- * them into the shared Sheet. Existing rows are updated in place
- * with their status preserved; new contacts are appended.
  * @param {string} me - The current account's email address.
  */
 function pushToSheet(me) {
@@ -177,23 +188,46 @@ function pushToSheet(me) {
   var sheet = getOrCreateSheet();
   var existingData = sheet.getDataRange().getValues();
 
-  // Build an index of existing fingerprints → row number so we
-  // can update rows in place rather than appending duplicates
+  // Build an index of fingerprint → row number for in-place updates
   var fingerprintIndex = {};
   for (var i = 1; i < existingData.length; i++) {
     fingerprintIndex[existingData[i][0]] = i + 1; // 1-based row number
   }
 
+  // Build a set of normalised hashes from rows received from the other
+  // account. Used to skip contacts that originated there and are unchanged.
+  var receivedHashSet = {};
+  for (var i = 1; i < existingData.length; i++) {
+    var existingRow = existingData[i];
+    if (existingRow[1].toLowerCase() !== me && existingRow[3] === 'imported') {
+      var storedHash = existingRow[4] || '';
+      if (storedHash) receivedHashSet[storedHash] = true;
+    }
+  }
+
   contacts.forEach(function(person) {
     var fp = fingerprint(person, me);
     var row = serializeContact(person, me, fp);
+    var currentHash = row[4];
+
+    // Skip contacts received from the other account that are unchanged
+    if (receivedHashSet[currentHash]) {
+      Logger.log('Skipped (unchanged, received from other account): ' + primaryName(person));
+      return;
+    }
+
     if (fingerprintIndex[fp]) {
-      // Preserve the existing status so a row marked "imported" by
-      // the other account is not reset to blank on each push
-      var existingStatus = existingData[fingerprintIndex[fp] - 1][3];
-      row[3] = existingStatus;
+      var storedHash = existingData[fingerprintIndex[fp] - 1][4] || '';
+      if (currentHash === storedHash) {
+        // Data unchanged — skip entirely, Sheet row is already correct
+        Logger.log('Skipped (unchanged): ' + primaryName(person));
+        return;
+      }
+      // Data changed — write with blank status so the other account re-pulls
+      Logger.log('Pushed (updated): ' + primaryName(person));
       sheet.getRange(fingerprintIndex[fp], 1, 1, row.length).setValues([row]);
     } else {
+      Logger.log('Pushed (new): ' + primaryName(person));
       sheet.appendRow(row);
     }
     pushed++;
@@ -204,20 +238,19 @@ function pushToSheet(me) {
 
 // ============================================================
 // PULL
-// Reads rows in the shared Sheet that were written by the OTHER
-// account and haven't been imported yet (status column is blank).
-// For each row, attempts to find a matching contact in this
-// account by checking if any email address AND the full display
-// name both match. If a match is found, the contact data is
-// merged using a freshly fetched etag to avoid stale etag
-// errors. If no match is found, a new contact is created.
-// Once processed, the row is marked "imported" so it is never
-// processed again.
+// Reads rows written by the OTHER account that have not yet
+// been imported (blank status). For each row, attempts to find
+// a matching contact by any email address AND full display name.
+// For contacts with no email address, falls back to name-only
+// matching. If matched, the contact is merged using a freshly
+// fetched etag to prevent stale etag errors. If not matched,
+// a new contact is created. Processed rows are marked "imported"
+// so they are never processed again — unless the contact is
+// subsequently changed, in which case pushToSheet resets the
+// status to blank and the cycle repeats.
 // ============================================================
 
 /**
- * Reads unprocessed rows from the other account in the shared Sheet
- * and either merges them into an existing contact or creates a new one.
  * @param {string} me - The current account's email address.
  */
 function pullFromSheet(me) {
@@ -229,10 +262,7 @@ function pullFromSheet(me) {
     return;
   }
 
-  // Index all contacts in this account by every email address
-  // they have, for use in match lookups
   var indexed = getAllContactsIndexed();
-
   var newCount = 0;
   var mergedCount = 0;
   var failedCount = 0;
@@ -243,10 +273,8 @@ function pullFromSheet(me) {
     var source = row[1];
     var status = row[3];
 
-    // Skip rows written by this account — only process the other account's rows
-    if (source.toLowerCase() === me) continue;
-    // Skip rows already imported
-    if (status === 'imported') continue;
+    if (source.toLowerCase() === me) continue;  // skip own rows
+    if (status === 'imported') continue;         // skip already processed rows
 
     var person = deserializeContact(row);
     if (!person) {
@@ -257,13 +285,9 @@ function pullFromSheet(me) {
 
     var match = findExactMatch(person, indexed);
     if (match) {
-      // Merge incoming data into the existing contact.
-      // Re-fetch the contact immediately before updating to get a
-      // guaranteed fresh etag — using the etag from the initial index
-      // fetch can cause "resource exhausted" errors if the contact
-      // was modified between indexing and the update call.
       var body = mergeContactBody(buildContactBody(match), buildContactBody(person));
       try {
+        // Re-fetch immediately before updating to get a guaranteed fresh etag
         var fresh = People.People.get(match.resourceName, {
           personFields: PERSON_FIELDS + ',metadata'
         });
@@ -279,7 +303,6 @@ function pullFromSheet(me) {
         errors.push('Merge failed: ' + primaryName(person) + ' — ' + e.message);
       }
     } else {
-      // No match found — create as a new contact
       var success = createContact(person);
       if (success) {
         newCount++;
@@ -289,7 +312,6 @@ function pullFromSheet(me) {
       }
     }
 
-    // Mark row as imported regardless of success, to avoid reprocessing
     sheet.getRange(i + 1, 4).setValue('imported');
   }
 
@@ -298,44 +320,46 @@ function pullFromSheet(me) {
 
 // ============================================================
 // MATCHING
-// A contact is considered a match if:
-//   1. Any email address on the incoming contact matches any
-//      email address on the existing contact (any-to-any), AND
-//   2. The full display name matches exactly (case-insensitive)
-// Both conditions must be true to prevent false matches where
-// different people share an email address or name alone.
+// Primary match: any email on the incoming contact matches any
+// email on an existing contact (any-to-any), AND the full
+// display name matches exactly (case-insensitive).
+//
+// Fallback match: if the incoming contact has no email address,
+// match by display name alone via the byName index. This handles
+// contacts like businesses or services with no email address.
+//
+// Requiring name in both cases prevents false matches where
+// different contacts share a common identifier.
 // ============================================================
 
 /**
- * Attempts to find an existing contact in this account that matches
- * the incoming contact by any email address AND full display name.
  * @param {Object} person - The incoming contact body.
- * @param {Object} indexed - Object with byEmail map of existing contacts.
- * @return {Object|null} The matching existing contact, or null if none found.
+ * @param {Object} indexed - Object with byEmail and byName maps.
+ * @return {Object|null} Matching existing contact, or null if not found.
  */
 function findExactMatch(person, indexed) {
   var name = primaryName(person);
-  if (!name) return null; // Cannot match without a name
+  if (!name) return null;
 
-  // Collect all email addresses from the incoming contact
   var incomingEmails = (person.emailAddresses || [])
     .map(function(e) { return (e.value || '').toLowerCase(); })
     .filter(Boolean);
 
-  if (!incomingEmails.length) return null; // Cannot match without an email
-
-  // Check each incoming email against the index of existing contacts
-  for (var i = 0; i < incomingEmails.length; i++) {
-    var candidate = indexed.byEmail[incomingEmails[i]];
-    if (!candidate) continue;
-
-    var candidateName = primaryName(candidate);
-    if (!candidateName) continue;
-
-    // Require full display name match (case-insensitive)
-    if (candidateName.toLowerCase() === name.toLowerCase()) {
-      return candidate;
+  if (incomingEmails.length) {
+    // Primary match: any email + name
+    for (var i = 0; i < incomingEmails.length; i++) {
+      var candidate = indexed.byEmail[incomingEmails[i]];
+      if (!candidate) continue;
+      var candidateName = primaryName(candidate);
+      if (!candidateName) continue;
+      if (candidateName.toLowerCase() === name.toLowerCase()) {
+        return candidate;
+      }
     }
+  } else {
+    // Fallback: name-only match for contacts with no email
+    var nameCandidate = indexed.byName[name.toLowerCase()];
+    if (nameCandidate) return nameCandidate;
   }
 
   return null;
@@ -343,34 +367,26 @@ function findExactMatch(person, indexed) {
 
 // ============================================================
 // MERGE
-// When a match is found, incoming data is merged into the
-// existing contact rather than overwriting it entirely:
-//
-//   Array fields (phones, addresses, URLs, etc.): incoming
-//   items are appended to the existing list, with duplicates
-//   removed by value to prevent the same number or address
-//   accumulating across multiple sync runs.
-//
-//   Scalar fields (name, birthday, bio, etc.): incoming value
-//   wins if non-empty, otherwise the existing value is kept.
+// Array fields (phones, addresses, URLs, etc.) are appended
+// and deduplicated by the item's primary value field (e.g.
+// the phone number string itself) rather than the full JSON
+// object. This prevents duplicate entries caused by minor
+// differences in field ordering or metadata between accounts.
+// Scalar fields (name, birthday, etc.) are overwritten by the
+// incoming value if non-empty, otherwise the existing value
+// is kept.
 // ============================================================
 
 /**
- * Merges two contact bodies together. Array fields are concatenated
- * and deduplicated by value; scalar fields prefer the incoming value
- * if present.
  * @param {Object} existing - The current contact body from this account.
  * @param {Object} incoming - The contact body from the other account.
  * @return {Object} The merged contact body.
  */
 function mergeContactBody(existing, incoming) {
-  // Fields that can have multiple values — append and deduplicate
   var arrayFields = [
     'emailAddresses', 'phoneNumbers', 'addresses', 'urls',
     'relations', 'events', 'imClients', 'miscKeywords', 'userDefined'
   ];
-
-  // Fields with a single value — incoming wins if non-empty
   var scalarFields = [
     'names', 'nicknames', 'organizations', 'birthdays',
     'biographies', 'occupations', 'interests', 'locales',
@@ -382,11 +398,12 @@ function mergeContactBody(existing, incoming) {
   arrayFields.forEach(function(f) {
     if (incoming[f] && incoming[f].length) {
       var combined = (body[f] || []).concat(incoming[f]);
-      // Deduplicate by JSON string representation to catch exact
-      // duplicates that accumulate across multiple sync runs
       var seen = {};
       body[f] = combined.filter(function(item) {
-        var key = JSON.stringify(item);
+        // Deduplicate by the item's primary value field to avoid false
+        // duplicates caused by metadata differences between accounts
+        var key = item.value || item.formattedValue ||
+                  item.canonicalForm || JSON.stringify(item);
         if (seen[key]) return false;
         seen[key] = true;
         return true;
@@ -410,12 +427,10 @@ function mergeContactBody(existing, incoming) {
 
 /**
  * Returns all contacts in this account that are members of the
- * "share" contact group. Fetches full contact details for all
- * members in batches of 200 (the API maximum per request).
+ * "share" contact group, fetched in batches of 200 (API maximum).
  * @return {Array} Array of person objects.
  */
 function getShareContacts() {
-  // Find the contact group named LABEL_NAME
   var groupsResp = People.ContactGroups.list();
   var groups = groupsResp.contactGroups || [];
   var group = groups.filter(function(g) {
@@ -427,12 +442,10 @@ function getShareContacts() {
     return [];
   }
 
-  // Fetch the group's member resource names
   var detail = People.ContactGroups.get(group.resourceName, { maxMembers: 1000 });
   var members = detail.memberResourceNames || [];
   if (!members.length) return [];
 
-  // Batch fetch full contact details (max 200 per request)
   var results = [];
   for (var i = 0; i < members.length; i += 200) {
     var batch = members.slice(i, i + 200);
@@ -449,42 +462,36 @@ function getShareContacts() {
 
 /**
  * Fetches all contacts in this account and indexes them by every
- * email address they have. A single contact with two email addresses
- * will appear twice in the index, once per email. This supports
- * any-to-any email matching in findExactMatch.
- * @return {Object} Object with byEmail property mapping email → person.
+ * email address they have (for primary matching) and by display
+ * name (for fallback matching of contacts with no email).
+ * @return {Object} Object with byEmail and byName maps.
  */
 function getAllContactsIndexed() {
   var byEmail = {};
+  var byName = {};
   var pageToken = null;
 
   do {
-    var params = {
-      personFields: PERSON_FIELDS + ',metadata',
-      pageSize: 1000
-    };
+    var params = { personFields: PERSON_FIELDS + ',metadata', pageSize: 1000 };
     if (pageToken) params.pageToken = pageToken;
-
     var resp = People.People.Connections.list('people/me', params);
-
     (resp.connections || []).forEach(function(p) {
-      // Index by ALL email addresses, not just the primary
       (p.emailAddresses || []).forEach(function(e) {
         if (e.value) byEmail[e.value.toLowerCase()] = p;
       });
+      var name = primaryName(p);
+      if (name) byName[name.toLowerCase()] = p;
     });
-
     pageToken = resp.nextPageToken;
   } while (pageToken);
 
-  return { byEmail: byEmail };
+  return { byEmail: byEmail, byName: byName };
 }
 
 /**
- * Creates a new contact in this account from the given person body,
- * then adds it to the "share" contact group.
+ * Creates a new contact and adds it to the "share" group.
  * @param {Object} person - The contact body to create.
- * @return {boolean} True if creation succeeded, false if it failed.
+ * @return {boolean} True on success, false on failure.
  */
 function createContact(person) {
   var body = buildContactBody(person);
@@ -500,8 +507,7 @@ function createContact(person) {
 }
 
 /**
- * Adds a contact to the "share" contact group in this account.
- * Creates the group first if it doesn't exist.
+ * Adds a contact to the "share" group, creating the group if needed.
  * @param {string} resourceName - The contact's People API resource name.
  */
 function addToShareGroup(resourceName) {
@@ -512,9 +518,7 @@ function addToShareGroup(resourceName) {
   })[0];
 
   if (!group) {
-    // Create the group if it doesn't exist in this account
-    var newGroup = People.ContactGroups.create({ contactGroup: { name: LABEL_NAME } });
-    group = newGroup;
+    group = People.ContactGroups.create({ contactGroup: { name: LABEL_NAME } });
   }
 
   People.ContactGroups.Members.modify(
@@ -525,31 +529,44 @@ function addToShareGroup(resourceName) {
 
 // ============================================================
 // SERIALIZATION
-// Contacts are stored in the Sheet as JSON blobs so that all
-// fields can be round-tripped without requiring one column per
-// field. The metadata field is stripped before storage as it
-// contains read-only API data that would cause errors on write.
+// Contacts are stored as JSON blobs so all fields round-trip
+// without requiring one column per field. The metadata sub-field
+// is stripped before storage as it is read-only and would cause
+// errors on write.
+//
+// Each row is five columns: fingerprint | source | data | status | hash
+//
+// The hash is computed from a normalised version of the contact
+// body where API-derived fields are stripped before hashing.
+// This ensures the hash reflects only user-set data and is
+// stable across API round-trips and across accounts, even when
+// Google adds or reformats fields like formattedType or
+// canonicalForm on create or read.
+//
+// Fields stripped before hashing — from all items:
+//   formattedType, canonicalForm
+// Additionally stripped from names items:
+//   displayName, displayNameLastFirst, unstructuredName
 // ============================================================
 
 /**
- * Serializes a contact into a Sheet row: [fingerprint, source, json, status].
- * Status is always written as empty string here — the caller is responsible
- * for preserving an existing status value when updating a row in place.
+ * Serializes a contact into a five-element Sheet row.
  * @param {Object} person - The contact to serialize.
  * @param {string} me - The current account's email address.
  * @param {string} fp - The contact's fingerprint string.
- * @return {Array} A four-element array representing the Sheet row.
+ * @return {Array} [fingerprint, source, json, status, hash]
  */
 function serializeContact(person, me, fp) {
-  var blob = buildContactBody(person);
-  return [fp, me, JSON.stringify(blob), ''];
+  var body = buildContactBody(person);
+  var json = JSON.stringify(body);
+  return [fp, me, json, '', stableHash(normaliseForHash(body))];
 }
 
 /**
- * Deserializes a Sheet row back into a contact body object.
- * Returns null if the JSON is malformed.
+ * Deserializes a Sheet row into a contact body. Returns null if
+ * the JSON is malformed.
  * @param {Array} row - A Sheet row array.
- * @return {Object|null} The contact body, or null on parse failure.
+ * @return {Object|null}
  */
 function deserializeContact(row) {
   try {
@@ -560,9 +577,8 @@ function deserializeContact(row) {
 }
 
 /**
- * Extracts all writable fields from a person object into a clean
- * contact body suitable for create or update API calls. Strips
- * the metadata sub-field from each field item, as it is read-only.
+ * Extracts all writable fields from a person object, stripping
+ * the read-only metadata sub-field from each item.
  * @param {Object} person - The source person object.
  * @return {Object} A clean contact body.
  */
@@ -579,7 +595,7 @@ function buildContactBody(person) {
     if (person[f]) {
       body[f] = person[f].map(function(item) {
         var clean = Object.assign({}, item);
-        delete clean.metadata; // Remove read-only metadata before writing
+        delete clean.metadata;
         return clean;
       });
     }
@@ -587,29 +603,50 @@ function buildContactBody(person) {
   return body;
 }
 
+/**
+ * Strips API-derived fields from a contact body before hashing
+ * so the hash reflects only user-set data.
+ * @param {Object} body - A clean contact body from buildContactBody.
+ * @return {Object} A normalised copy suitable for hashing.
+ */
+function normaliseForHash(body) {
+  var allItemFields = ['formattedType', 'canonicalForm'];
+  var nameOnlyFields = ['displayName', 'displayNameLastFirst', 'unstructuredName'];
+  var result = {};
+  Object.keys(body).forEach(function(f) {
+    result[f] = body[f].map(function(item) {
+      var clean = Object.assign({}, item);
+      allItemFields.forEach(function(k) { delete clean[k]; });
+      if (f === 'names') {
+        nameOnlyFields.forEach(function(k) { delete clean[k]; });
+      }
+      return clean;
+    });
+  });
+  return result;
+}
+
 // ============================================================
 // SHEET HELPERS
 // ============================================================
 
 /**
- * Returns the contacts sheet, creating it with headers if it
- * doesn't already exist.
- * @return {Sheet} The contacts Google Sheet tab.
+ * Returns the contacts sheet, creating it with headers if needed.
+ * @return {Sheet}
  */
 function getOrCreateSheet() {
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAME);
-    sheet.appendRow(['fingerprint', 'source', 'data', 'status']);
+    sheet.appendRow(['fingerprint', 'source', 'data', 'status', 'hash']);
   }
   return sheet;
 }
 
 /**
- * Returns the log sheet, creating it with headers if it
- * doesn't already exist.
- * @return {Sheet} The log Google Sheet tab.
+ * Returns the log sheet, creating it with a frozen header row if needed.
+ * @return {Sheet}
  */
 function getOrCreateLogSheet() {
   var ss = SpreadsheetApp.openById(SHEET_ID);
@@ -617,57 +654,43 @@ function getOrCreateLogSheet() {
   if (!sheet) {
     sheet = ss.insertSheet(LOG_SHEET_NAME);
     sheet.appendRow(['timestamp', 'account', 'direction', 'pushed', 'new', 'merged', 'failed', 'errors']);
-        sheet.setFrozenRows(1);
+    sheet.setFrozenRows(1);
   }
   return sheet;
 }
 
 // ============================================================
 // LOGGING
-// When LOGGING_ENABLED is true, each push and pull operation
-// writes a summary row to the log sheet containing a timestamp,
-// account email, direction, and counts of pushed, new, merged,
-// failed contacts, plus any error messages. Because both accounts
-// write to the same Sheet, log entries from both accounts appear
-// in a single combined chronological view. The log is
-// automatically trimmed to LOG_MAX_ROWS to prevent unbounded
-// growth. Error strings are truncated to LOG_MAX_ERROR_LENGTH
-// to prevent exceeding Google Sheets' 50,000 character cell
-// limit. Logging failures are caught silently so they never
-// interrupt the sync itself.
+// When LOGGING_ENABLED is true, each push and pull appends a
+// summary row to the log sheet. Both accounts write to the same
+// sheet so all activity appears in a single chronological view.
+// The log is trimmed to LOG_MAX_ROWS automatically. Error strings
+// are capped at LOG_MAX_ERROR_LENGTH to avoid exceeding Google
+// Sheets' 50,000 character cell limit. Logging failures are
+// caught silently so they never interrupt the sync.
 // ============================================================
 
 /**
- * Writes a log entry to the log sheet if logging is enabled.
- * Automatically trims the log to LOG_MAX_ROWS after writing.
- * @param {string} account - The account email that ran the sync.
- * @param {string} direction - 'push', 'pull', or 'sync' (for lock failures).
- * @param {number} pushed - Number of contacts pushed to the Sheet.
- * @param {number} newCount - Number of new contacts created.
- * @param {number} merged - Number of contacts merged.
- * @param {number} failed - Number of failed operations.
- * @param {string} errors - Semicolon-separated error messages, if any.
+ * Appends a log entry if logging is enabled, then trims old rows.
+ * @param {string} account - Email of the account that ran the sync.
+ * @param {string} direction - 'push', 'pull', or 'sync' (lock failure).
+ * @param {number} pushed - Contacts pushed to the Sheet.
+ * @param {number} newCount - New contacts created.
+ * @param {number} merged - Contacts merged.
+ * @param {number} failed - Failed operations.
+ * @param {string} errors - Semicolon-separated error messages.
  */
 function writeLog(account, direction, pushed, newCount, merged, failed, errors) {
   if (!LOGGING_ENABLED) return;
-
   try {
     var sheet = getOrCreateLogSheet();
-    var timestamp = new Date().toISOString();
-
-    // Truncate error string to prevent exceeding Sheets' 50,000 character cell limit
     var safeErrors = (errors || '').toString().substring(0, LOG_MAX_ERROR_LENGTH);
-
-    sheet.appendRow([timestamp, account, direction, pushed, newCount, merged, failed, safeErrors]);
-
-    // Trim to LOG_MAX_ROWS, keeping the header row
+    sheet.appendRow([new Date().toISOString(), account, direction, pushed, newCount, merged, failed, safeErrors]);
     var totalRows = sheet.getLastRow();
     if (totalRows > LOG_MAX_ROWS + 1) {
-      var rowsToDelete = totalRows - LOG_MAX_ROWS - 1;
-      sheet.deleteRows(2, rowsToDelete);
+      sheet.deleteRows(2, totalRows - LOG_MAX_ROWS - 1);
     }
   } catch(e) {
-    // Log failures should never break the sync itself
     Logger.log('Logging failed: ' + e);
   }
 }
@@ -675,13 +698,11 @@ function writeLog(account, direction, pushed, newCount, merged, failed, errors) 
 // ============================================================
 // DEBUG HELPER
 // Run debugSheet() manually from the Apps Script editor to
-// print a human-readable summary of the contacts Sheet to the
-// execution log. Useful for diagnosing sync issues.
+// print a readable summary of the contacts Sheet to the log.
 // ============================================================
 
 /**
- * Prints a summary of each row in the contacts Sheet to the log,
- * including contact name, source account, status, and email count.
+ * Prints a diagnostic summary of the contacts Sheet to the log.
  * Run manually from the Apps Script editor when needed.
  */
 function debugSheet() {
@@ -694,9 +715,6 @@ function debugSheet() {
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    var fp = row[0];
-    var source = row[1];
-    var status = row[3] || '(blank)';
     var name = '(unknown)';
     var emailCount = 0;
     try {
@@ -704,28 +722,79 @@ function debugSheet() {
       if (person.names && person.names[0]) name = person.names[0].displayName;
       emailCount = (person.emailAddresses || []).length;
     } catch(e) {}
-
     Logger.log('Row ' + i + ': ' + name +
-               ' | source: ' + source +
-               ' | status: ' + status +
+               ' | source: ' + row[1] +
+               ' | status: ' + (row[3] || '(blank)') +
                ' | emails in blob: ' + emailCount +
-               ' | fingerprint: ' + fp);
+               ' | hash: ' + (row[4] || '(none)') +
+               ' | fingerprint: ' + row[0]);
   }
 }
 
 // ============================================================
 // UTILITIES
+// normaliseForHash — strips API-derived fields before hashing
+// stableHash / stableStringify — field-order-independent hash
+// simpleHash — underlying numeric hash function
+// fingerprint — stable Sheet row identifier per contact
+// primaryEmail / primaryName — extract primary field values
 // ============================================================
 
 /**
- * Generates a stable fingerprint string for a contact, used to
- * identify its row in the Sheet across runs. Uses the primary
- * email if available, then the display name, then falls back to
- * the People API resource name. The account email is prefixed
- * so fingerprints from different accounts never collide.
- * @param {Object} person - The contact to fingerprint.
- * @param {string} me - The current account's email address.
- * @return {string} A fingerprint string.
+ * Computes a hash of an object that is stable regardless of the
+ * order in which fields or array items appear. Safe for
+ * cross-account comparisons where the same contact may have
+ * fields in a different order depending on the API response.
+ * @param {Object} obj
+ * @return {string} Hash as a base-36 string.
+ */
+function stableHash(obj) {
+  return simpleHash(stableStringify(obj));
+}
+
+/**
+ * Serializes a value to a JSON string with object keys sorted
+ * alphabetically at every level and array items sorted by their
+ * serialized representation, ensuring consistent output regardless
+ * of field or item ordering.
+ * @param {*} val
+ * @return {string}
+ */
+function stableStringify(val) {
+  if (Array.isArray(val)) {
+    return '[' + val.map(stableStringify).sort().join(',') + ']';
+  }
+  if (val && typeof val === 'object') {
+    return '{' + Object.keys(val).sort().map(function(k) {
+      return JSON.stringify(k) + ':' + stableStringify(val[k]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(val);
+}
+
+/**
+ * Computes a simple numeric hash of a string. Not cryptographic —
+ * collision resistance is sufficient for change detection purposes.
+ * @param {string} str
+ * @return {string} Hash as a base-36 string.
+ */
+function simpleHash(str) {
+  var hash = 0;
+  for (var i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
+
+/**
+ * Generates a stable fingerprint for a contact to identify its
+ * Sheet row across runs. Prefixed with the account email so
+ * fingerprints from different accounts never collide. Falls back
+ * from primary email → display name → resource name.
+ * @param {Object} person
+ * @param {string} me
+ * @return {string}
  */
 function fingerprint(person, me) {
   var email = primaryEmail(person);
@@ -737,9 +806,8 @@ function fingerprint(person, me) {
 
 /**
  * Returns the primary email address for a contact, or null if none.
- * Prefers the address flagged as primary; falls back to the first
- * address in the list.
- * @param {Object} person - The contact object.
+ * Prefers the address flagged as primary; falls back to the first.
+ * @param {Object} person
  * @return {string|null}
  */
 function primaryEmail(person) {
@@ -751,9 +819,8 @@ function primaryEmail(person) {
 
 /**
  * Returns the primary display name for a contact, or null if none.
- * Prefers the name flagged as primary; falls back to the first
- * name in the list.
- * @param {Object} person - The contact object.
+ * Prefers the name flagged as primary; falls back to the first.
+ * @param {Object} person
  * @return {string|null}
  */
 function primaryName(person) {
