@@ -1,6 +1,6 @@
 # Google Contacts Share
 
-Bidirectional sync of contacts labelled **"share"** between two Google accounts, using Google Apps Script and a Google Sheet as a sync buffer.
+Bidirectional sync of contacts labelled **"share"** between two personal Google accounts, using Google Apps Script and a Google Sheet as a sync buffer.
 
 ---
 
