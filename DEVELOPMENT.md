@@ -174,7 +174,7 @@ indexing and the update call.
 When upgrading from any previous version, clear all data rows from the `contacts`
 Sheet tab (keep the header row) and let both accounts re-push fresh. This
 ensures hashes are recomputed with the current normalisation logic. The first
-run after clearing will push all contacts and the other account will pull them —
+run after clearing will push all shared contacts and the other account will pull them —
 this is a one-time operation.
 
 If the Sheet is missing the `hash` header in column E, add it manually to cell E1.
