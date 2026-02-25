@@ -67,6 +67,18 @@ Before submitting a pull request, verify the following manually:
 
 ---
 
+## Pull Request Expectations
+
+Pull requests should:
+- Be focused on a single issue or feature
+- Avoid large refactors unrelated to the change
+- Preserve existing behaviour unless clearly justified
+- Include a brief explanation of design decisions if the logic is non-trivial
+
+Large architectural rewrites are unlikely to be accepted.
+
+---
+
 ## Scope
 
 This project intentionally stays simple. The following are out of scope and unlikely to be accepted as pull requests:
