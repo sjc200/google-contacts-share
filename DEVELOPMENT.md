@@ -1,7 +1,7 @@
 # Development Notes
 
 This document captures the architecture, design decisions, bugs fixed, and known
-edge cases for Google Contacts Share. It is intended to provide full context when
+edge cases for Google Contacts Share. It is intended to provide context when
 continuing development.
 
 ---
