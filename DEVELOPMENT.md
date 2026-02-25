@@ -2,7 +2,7 @@
 
 This document captures the architecture, design decisions, bugs fixed, and known
 edge cases for Google Contacts Share. It is intended to provide full context when
-continuing development in a new session.
+continuing development.
 
 ---
 
