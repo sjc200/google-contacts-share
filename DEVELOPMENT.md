@@ -68,8 +68,7 @@ existing contact (any-to-any), AND the full display name matches
 family emails or common names.
 
 **Fallback match:** if the incoming contact has no email address at all, match
-by display name alone. This handles business/service contacts (e.g. "Airportcarz")
-that have no associated email.
+by display name alone. This handles contacts that have no associated email.
 
 ---
 
