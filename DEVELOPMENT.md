@@ -1,8 +1,8 @@
 # Development Notes
 
 This document captures the architecture, design decisions, bugs fixed, and known
-edge cases for Google Contacts Share. It is intended to provide context when
-continuing development.
+edge cases for Google Contacts Share. It is intended to provide full context when
+continuing development in a new session.
 
 ---
 
@@ -68,7 +68,8 @@ existing contact (any-to-any), AND the full display name matches
 family emails or common names.
 
 **Fallback match:** if the incoming contact has no email address at all, match
-by display name alone. This handles contacts that have no associated email.
+by display name alone. This handles business/service contacts (e.g. "Airportcarz")
+that have no associated email.
 
 ---
 
@@ -145,6 +146,16 @@ indexing and the update call.
 - "Pushed (unchanged)" removed — unchanged contacts are now skipped entirely
   rather than written to the Sheet with identical data
 
+**v1.4.1**
+- Label/type changes on email addresses and phone numbers not propagating to
+  the receiving account. Root cause: array field deduplication by value
+  discarded incoming items that matched an existing value, even when type or
+  label had changed. Fixed by replacing the filter/dedup approach in
+  mergeContactBody with a two-pass map: existing items loaded first, incoming
+  items applied on top, so updated items correctly replace existing ones rather
+  than being discarded. Also correctly handles setting a label for the first
+  time on a previously unlabelled field.
+
 ---
 
 ## Known Limitations
@@ -174,7 +185,7 @@ indexing and the update call.
 When upgrading from any previous version, clear all data rows from the `contacts`
 Sheet tab (keep the header row) and let both accounts re-push fresh. This
 ensures hashes are recomputed with the current normalisation logic. The first
-run after clearing will push all shared contacts and the other account will pull them —
+run after clearing will push all contacts and the other account will pull them —
 this is a one-time operation.
 
 If the Sheet is missing the `hash` header in column E, add it manually to cell E1.
