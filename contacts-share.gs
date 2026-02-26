@@ -10,7 +10,7 @@
  * Setup: see README.md
  * Development history and architecture decisions: see DEVELOPMENT.md
  *
- * @version 1.4.0
+ * @version 1.4.1
  * @author sjc200
  * @licence GNU GPL v3
  */
@@ -367,11 +367,14 @@ function findExactMatch(person, indexed) {
 
 // ============================================================
 // MERGE
-// Array fields (phones, addresses, URLs, etc.) are appended
-// and deduplicated by the item's primary value field (e.g.
-// the phone number string itself) rather than the full JSON
-// object. This prevents duplicate entries caused by minor
-// differences in field ordering or metadata between accounts.
+// Array fields (phones, addresses, URLs, etc.) are merged using
+// a two-pass map approach: existing items are loaded into a map
+// keyed by their primary value field, then incoming items are
+// applied on top. This means new items are added, unchanged
+// items are kept, and updated items (e.g. a changed type/label
+// on an email or phone number) correctly replace the existing
+// item rather than being discarded. Insertion order is preserved
+// via a separate keyOrder array.
 // Scalar fields (name, birthday, etc.) are overwritten by the
 // incoming value if non-empty, otherwise the existing value
 // is kept.
@@ -397,17 +400,27 @@ function mergeContactBody(existing, incoming) {
 
   arrayFields.forEach(function(f) {
     if (incoming[f] && incoming[f].length) {
-      var combined = (body[f] || []).concat(incoming[f]);
-      var seen = {};
-      body[f] = combined.filter(function(item) {
-        // Deduplicate by the item's primary value field to avoid false
-        // duplicates caused by metadata differences between accounts
+      // Two-pass merge: build a map of value → item from existing items,
+      // then overwrite with incoming items for the same value. This ensures
+      // that changes to properties of an existing item (e.g. a label/type
+      // change on a phone number or email address) are correctly applied
+      // rather than being discarded by deduplication. New items are added,
+      // unchanged items are kept, and updated items are replaced.
+      var itemMap = {};
+      var keyOrder = [];
+      (body[f] || []).forEach(function(item) {
         var key = item.value || item.formattedValue ||
                   item.canonicalForm || JSON.stringify(item);
-        if (seen[key]) return false;
-        seen[key] = true;
-        return true;
+        if (!itemMap.hasOwnProperty(key)) keyOrder.push(key);
+        itemMap[key] = item;
       });
+      incoming[f].forEach(function(item) {
+        var key = item.value || item.formattedValue ||
+                  item.canonicalForm || JSON.stringify(item);
+        if (!itemMap.hasOwnProperty(key)) keyOrder.push(key);
+        itemMap[key] = item; // incoming overwrites existing for same value
+      });
+      body[f] = keyOrder.map(function(k) { return itemMap[k]; });
     }
   });
 
