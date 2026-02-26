@@ -73,7 +73,7 @@ All configuration is at the top of the script. The only values that need changin
 
 All standard contact fields are synced:
 
-names, nicknames, email addresses, phone numbers, postal addresses, organisations, birthdays, biographies, URLs, relations, events, IM clients, occupations, interests, locales, locations, miscellaneous keywords, genders, user-defined fields.
+names, nicknames, email addresses (including labels), phone numbers (including labels), postal addresses, organisations, birthdays, biographies, URLs, relations, events, IM clients, occupations, interests, locales, locations, miscellaneous keywords, genders, user-defined fields.
 
 **Not synced:** profile photos (requires a separate API endpoint not available in Apps Script), contact deletions (out of scope — see DEVELOPMENT.md).
 
