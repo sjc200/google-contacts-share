@@ -1,6 +1,6 @@
 # Contributing to Google Contacts Share
 
-Thanks for your interest in contributing. This is a small personal utility project - I'd wanted something to do this for a long time, but couldnt find anything suitable / reliable / free. Contributions are welcome but please read the guidelines below before submitting.
+Thanks for your interest in contributing. This is a small personal utility project - I'd wanted something to do this for a long time, but couldnt find anything suitable / reliable / free. Contributions are very welcome but please read the guidelines below before submitting.
 
 ---
 
